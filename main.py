@@ -454,130 +454,141 @@ def lucky_list(message):
     bot.send_message(message.chat.id, text)
 
 
-@bot.message_handler(commands=["set_azart"])
-def toggle_azart(message):
-    global azart_enabled
-    if message.from_user.id != ADMIN_ID:
-        return bot.reply_to(message, "⛔ Bu buyruq faqat admin uchun!")
+ROWS, COLS = 5, 5
+BOMBS_COUNT = 5
+MIN_STAKE = 1000
 
-    azart_enabled = not azart_enabled
-    holat = "🟢 YONIQ" if azart_enabled else "🔴 O‘CHIQ"
-    bot.reply_to(message, f"⚙ Azart holati o‘zgartirildi: {holat}")
+def generate_bombs(exclude_cell):
+    all_cells = [(r, c) for r in range(ROWS) for c in range(COLS) if (r, c) != exclude_cell]
+    return set(random.sample(all_cells, BOMBS_COUNT))
 
-# Mines o'yinni boshlash
-@bot.message_handler(func=lambda m: m.text == "💣 Play Mines")
+def create_keyboard(opened):
+    markup = types.InlineKeyboardMarkup()
+    for i in range(ROWS * COLS):
+        r, c = divmod(i, COLS)
+        if i in opened:
+            text = "💰"
+            callback_data = "ignore"
+        else:
+            text = "⬜️"
+            callback_data = f"mines_{i}"
+        markup.insert(types.InlineKeyboardButton(text, callback_data=callback_data))
+    if opened:
+        markup.add(types.InlineKeyboardButton("💸 Pulni yechib olish", callback_data="mines_cashout"))
+    markup.add(types.InlineKeyboardButton("❌ O‘yin tugatish", callback_data="mines_stop"))
+    return markup
+
+def send_grid(chat_id, user_id):
+    state = user_mines_states[user_id]
+    opened = state["opened"]
+    stake = state["stake"]
+    multiplier = state["multiplier"]
+    winnings = int(stake * multiplier)
+
+    text = (
+        f"💣 Mines o'yini\n"
+        f"📈 Koef: x{multiplier:.2f}\n"
+        f"💰 Potensial yutuq: {winnings} so'm\n"
+        f"⬇️ Bombasiz kataklarni tanlang:"
+    )
+
+    bot.edit_message_text(text, chat_id, state["msg_id"], reply_markup=create_keyboard(opened))
+
+@bot.message_handler(commands=['start', 'playmines'])
 def start_mines(message):
     user_id = message.from_user.id
-    msg = bot.send_message(message.chat.id, "💸 Stavka miqdorini kiriting (min 1000 so‘m):")
-    bot.register_next_step_handler(msg, lambda msg: process_mines_stake(msg, user_id))
+    if user_id not in user_balances:
+        user_balances[user_id] = START_BALANCE
+    bot.send_message(message.chat.id,
+                     f"Salom! Sizning balansingiz: {user_balances[user_id]} so'm.\n"
+                     f"Iltimos, stavka miqdorini kiriting (min {MIN_STAKE} so‘m):")
+    bot.register_next_step_handler_by_chat_id(message.chat.id, process_stake)
 
-def process_mines_stake(message, user_id):
+def process_stake(message):
+    user_id = message.from_user.id
     try:
         stake = int(message.text)
-        if stake < 1000:
-            return bot.send_message(message.chat.id, "❌ Minimal stavka 1000 so‘m.")
+        if stake < MIN_STAKE:
+            bot.send_message(message.chat.id, f"❌ Minimal stavka {MIN_STAKE} so‘m.")
+            return
         if user_balances.get(user_id, 0) < stake:
-            return bot.send_message(message.chat.id, "❌ Mablag‘ yetarli emas.")
+            bot.send_message(message.chat.id, "❌ Mablag‘ yetarli emas.")
+            return
     except:
-        return bot.send_message(message.chat.id, "❌ Iltimos, to‘g‘ri raqam kiriting.")
+        bot.send_message(message.chat.id, "❌ Iltimos, to‘g‘ri raqam kiriting.")
+        return
 
     user_balances[user_id] -= stake
     user_mines_states[user_id] = {
         "stake": stake,
         "opened": [],
+        "bombs": set(),
         "multiplier": 1.0,
-        "alive": True
+        "alive": True,
+        "first_click": True,
+        "msg_id": None
     }
-    send_mines_grid(message.chat.id, user_id)
 
-def send_mines_grid(chat_id, user_id):
-    state = user_mines_states[user_id]
-    opened = state["opened"]
+    msg = bot.send_message(message.chat.id, "O'yin boshlandi! 5x5 kataklardan birini tanlang.")
+    user_mines_states[user_id]["msg_id"] = msg.message_id
 
-    markup = types.InlineKeyboardMarkup()
-
-    buttons = []
-    for i in range(25):
-        text = "⬜️" if i not in opened else "💰"
-        callback_data = f"mines_{i}" if i not in opened else "ignore"
-        buttons.append(types.InlineKeyboardButton(text, callback_data=callback_data))
-
-    # 5x5 ko‘rinishda chiqaramiz (har 5 ta tugmani bir qatorga)
-    for i in range(0, 25, 5):
-        markup.row(*buttons[i:i+5])
-
-    # Pulni yechib olish tugmasi faqat 1 ta katak ochilgan bo‘lsa ko‘rinadi
-    if opened:
-        markup.add(types.InlineKeyboardButton("💸 Pulni yechib olish", callback_data="mines_cashout"))
-
-    # Admin uchun azart holatini ko‘rsatish, boshqalarga ko‘rinmaydi
-    if user_id == ADMIN_ID:
-        azart_status = f"⚙ Azart: {'🟢 YONIQ' if azart_enabled else '🔴 O‘CHIQ'}\n\n"
-    else:
-        azart_status = ""
-
-    bot.send_message(chat_id,
-        f"💣 *Mines o‘yini*\n"
-        f"📈 Koef: x{round(state['multiplier'], 2)}\n"
-        f"💰 Potensial yutuq: {int(state['stake'] * state['multiplier'])} so‘m\n"
-        f"{azart_status}"
-        f"⬇️ Bombasiz kataklarni tanlang:",
-        reply_markup=markup,
-        parse_mode="Markdown"
-    )
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("mines_"))
-def handle_mines_click(call):
+@bot.callback_query_handler(func=lambda c: c.data.startswith('mines_') or c.data in ['mines_cashout', 'mines_stop', 'ignore'])
+def handle_mines(call):
     user_id = call.from_user.id
     state = user_mines_states.get(user_id)
+
     if not state or not state["alive"]:
+        bot.answer_callback_query(call.id, "O'yin boshlanmagan yoki tugagan.")
         return
 
     if call.data == "mines_cashout":
         winnings = int(state["stake"] * state["multiplier"])
         user_balances[user_id] += winnings
         bot.edit_message_text(
-            f"✅ Siz pulni yechib oldingiz!\n💰 Yutuq: {winnings:,} so‘m",
+            f"🎉 Pulni yechib oldingiz!\nYutuq: {winnings} so'm\nBalansingiz: {user_balances[user_id]} so'm",
             call.message.chat.id, call.message.message_id
         )
         user_mines_states.pop(user_id)
         return
 
-    index = int(call.data.split("_")[1])
-    if index in state["opened"]:
+    if call.data == "mines_stop":
+        bot.edit_message_text(
+            f"O'yin to‘xtatildi.\nBalansingiz: {user_balances[user_id]} so'm",
+            call.message.chat.id, call.message.message_id
+        )
+        user_mines_states.pop(user_id)
         return
 
-    step = len(state["opened"])
-    if azart_enabled:
-        # Azart yoqilgan: xavf oshadi
-        risk = 0.05 + (0.65 * (step / 24))
-    else:
-        # Azart o‘chirilgan: juda xavfsiz
-        risk = 0.01
+    if call.data == "ignore":
+        bot.answer_callback_query(call.id)
+        return
 
-    if random.random() < risk:
+    index = int(call.data.split("_")[1])
+    if index in state["opened"]:
+        bot.answer_callback_query(call.id, "Bu katak allaqachon ochilgan.")
+        return
+
+    if state["first_click"]:
+        r, c = divmod(index, COLS)
+        state["bombs"] = generate_bombs(exclude_cell=(r, c))
+        state["first_click"] = False
+
+    if index in [(r * COLS + c) for r, c in state["bombs"]]:
         state["alive"] = False
+        state["opened"].append(index)
         bot.edit_message_text(
             f"💥 Boom! Siz bombani bosdingiz! 😢\nStavka yo‘qotildi.",
-            call.message.chat.id, call.message.message_id
+            call.message.chat.id, call.message.message_id,
+            reply_markup=None
         )
         user_mines_states.pop(user_id)
         return
 
     state["opened"].append(index)
-    step += 1
+    state["multiplier"] += 0.2
 
-    multipliers = [
-        1.1, 1.2, 1.35, 1.5, 1.8, 2.1, 2.5,
-        3.0, 3.7, 4.6, 5.8, 7.2, 9.0, 11.3
-    ]
-    if step <= len(multipliers):
-        state["multiplier"] = multipliers[step - 1]
-    else:
-        state["multiplier"] = round(1.1 ** step, 2)
-
-    bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id)
-    send_mines_grid(call.message.chat.id, user_id)
+    send_grid(call.message.chat.id, user_id)
+    bot.answer_callback_query(call.id, "Katak ochildi!")
 
 
 # === AVIATOR o'yini funksiyasi ===
@@ -750,9 +761,9 @@ def handle_chicken(call):
 
         # Azart xavfi
         if azart_enabled:
-            risk = 0.3 + (pos * 0.08)
+            risk = 0.6 + (pos * 0.08)
         else:
-            risk = 0.05 + (pos * 0.03)
+            risk = 0.9 + (pos * 0.3)
 
         if random.random() < risk:
             line = []
